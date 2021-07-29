@@ -70,6 +70,10 @@ class MultiBoxLoss(nn.Module):
             truths = targets[idx][:, :-1].data
             labels = targets[idx][:, -1].data
             defaults = priors.data
+            if self.use_gpu:
+                truths = truths.cuda()
+                labels = labels.cuda()
+                defaults = defaults.cuda()
             match(self.threshold, truths, defaults, self.variance, labels,
                   loc_t, conf_t, idx)
         if self.use_gpu:

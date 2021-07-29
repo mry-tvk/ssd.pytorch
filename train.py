@@ -41,9 +41,9 @@ parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
 parser.add_argument('--num_workers', default=4, type=int,
                     help='Number of workers used in dataloading')
-parser.add_argument('--cuda', default=False, type=str2bool,
+parser.add_argument('--cuda', default=True, type=str2bool,
                     help='Use CUDA to train model')
-parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
+parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
                     help='Momentum value for optim')
@@ -51,24 +51,25 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--visdom', default=False, type=str2bool,
-                    help='Use visdom for loss visualization')
+parser.add_argument('--visdom', default=True, type=str2bool,
+                    help='Use visdom for loss visualization; make sure you run "python -m visdom.server" in terminal.')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('--roi', default="body",
                 help='Either face or body')
 args = parser.parse_args()
 
-
-if torch.cuda.is_available():
-    if args.cuda:
-        torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    if not args.cuda:
-        print("WARNING: It looks like you have a CUDA device, but aren't " +
-              "using CUDA.\nRun with --cuda for optimal training speed.")
-        torch.set_default_tensor_type('torch.FloatTensor')
-else:
-    torch.set_default_tensor_type('torch.FloatTensor')
+# Error: "yield from torch.randperm(n, generator=generator).tolist(). RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'"
+# ref: https://discuss.pytorch.org/t/distributedsampler-runtimeerror-expected-a-cuda-device-type-for-generator-but-found-cpu/103594
+# if torch.cuda.is_available():
+#     if args.cuda:
+#         torch.set_default_tensor_type('torch.cuda.FloatTensor')
+#     if not args.cuda:
+#         print("WARNING: It looks like you have a CUDA device, but aren't " +
+#               "using CUDA.\nRun with --cuda for optimal training speed.")
+#         torch.set_default_tensor_type('torch.FloatTensor')
+# else:
+#     torch.set_default_tensor_type('torch.FloatTensor')
 
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
@@ -180,19 +181,19 @@ def train():
             images, targets = next(batch_iterator)
 
 
-        if args.cuda:
-            images = Variable(images.cuda())
-            with torch.no_grad():
-                targets = [Variable(ann.cuda()) for ann in targets]
-        else:
-            images = Variable(images)
-            with torch.no_grad():
-                targets = [Variable(ann) for ann in targets]
-                
         # if args.cuda:
-        #     images = images.cuda() # Variable(images.cuda())
-        #     targets = [torch.FloatTensor(ann).cuda() for ann in targets]
-        # [ann.cuda() for ann in targets]
+        #     images = Variable(images.cuda())
+        #     with torch.no_grad():
+        #         targets = [Variable(ann.cuda()) for ann in targets]
+        # else:
+        #     images = Variable(images)
+        #     with torch.no_grad():
+        #         targets = [Variable(ann) for ann in targets]
+                
+        if args.cuda:
+            images = images.cuda() # Variable(images.cuda())
+            targets = [ann.cuda() for ann in targets]
+        # targets = [torch.FloatTensor(ann).cuda() for ann in targets]
         # ref: https://stackoverflow.com/questions/61720460/volatile-was-removed-and-now-had-no-effect-use-with-torch-no-grad-instread
         # [Variable(ann.cuda(), volatile=True) for ann in targets]
         

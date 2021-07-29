@@ -35,7 +35,7 @@ parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
                     help='Pretrained base model')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str,
+parser.add_argument('--resume', default='weights/ssd300_BFbootstrapBissau4p5k_prebossou_best.pth', type=str, #
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
@@ -118,7 +118,6 @@ def train():
         net = net.cuda()
         # device = torch.device('cuda' if args.cuda else 'cpu')
 
-
     if not args.resume:
         print('Initializing weights...')
         # initialize newly added layers' weights with xavier method
@@ -179,16 +178,6 @@ def train():
         except StopIteration:
             batch_iterator = iter(data_loader)
             images, targets = next(batch_iterator)
-
-
-        # if args.cuda:
-        #     images = Variable(images.cuda())
-        #     with torch.no_grad():
-        #         targets = [Variable(ann.cuda()) for ann in targets]
-        # else:
-        #     images = Variable(images)
-        #     with torch.no_grad():
-        #         targets = [Variable(ann) for ann in targets]
                 
         if args.cuda:
             images = images.cuda() # Variable(images.cuda())

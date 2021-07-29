@@ -8,11 +8,12 @@ import torchvision.transforms as transforms
 import cv2
 import numpy as np
 
-COCO_ROOT = osp.join(HOME, 'data/coco/')
+COCO_ROOT = osp.join(HOME, 'data/')
 IMAGES = 'images'
 ANNOTATIONS = 'annotations'
 COCO_API = 'PythonAPI'
-INSTANCES_SET = 'instances_{}.json'
+INSTANCES_SET =  'via_ft_{}.json' #'instances_val_{}.json'
+
 COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
                 'train', 'truck', 'boat', 'traffic light', 'fire', 'hydrant',
                 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
@@ -87,9 +88,9 @@ class COCODetection(data.Dataset):
                  target_transform=COCOAnnotationTransform(), dataset_name='MS COCO'):
         sys.path.append(osp.join(root, COCO_API))
         from pycocotools.coco import COCO
-        self.root = osp.join(root, IMAGES, image_set)
         self.coco = COCO(osp.join(root, ANNOTATIONS,
                                   INSTANCES_SET.format(image_set)))
+        self.root = root # osp.join(root, IMAGES) #, image_set)
         self.ids = list(self.coco.imgToAnns.keys())
         self.transform = transform
         self.target_transform = target_transform
@@ -120,11 +121,10 @@ class COCODetection(data.Dataset):
         img_id = self.ids[index]
         target = self.coco.imgToAnns[img_id]
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
-
         target = self.coco.loadAnns(ann_ids)
         path = osp.join(self.root, self.coco.loadImgs(img_id)[0]['file_name'])
         assert osp.exists(path), 'Image path does not exist: {}'.format(path)
-        img = cv2.imread(osp.join(self.root, path))
+        img = cv2.imread(path) #osp.join(self.root, path))
         height, width, _ = img.shape
         if self.target_transform is not None:
             target = self.target_transform(target, width, height)

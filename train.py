@@ -19,13 +19,17 @@ import argparse
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
+datasets ={
+    'face':'../datasets/dataset_ft_face',
+    'body': '../datasets/dataset_ft_body'
+}
 
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Training With Pytorch')
 train_set = parser.add_mutually_exclusive_group()
-parser.add_argument('--dataset', default='VOC', choices=['VOC', 'COCO'],
+parser.add_argument('--dataset', default='COCO', choices=['VOC', 'COCO'],
                     type=str, help='VOC or COCO')
-parser.add_argument('--dataset_root', default=VOC_ROOT,
+parser.add_argument('--dataset_root', default=datasets['body'], # VOC_ROOT,
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
                     help='Pretrained base model')
@@ -37,9 +41,9 @@ parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
 parser.add_argument('--num_workers', default=4, type=int,
                     help='Number of workers used in dataloading')
-parser.add_argument('--cuda', default=True, type=str2bool,
+parser.add_argument('--cuda', default=False, type=str2bool,
                     help='Use CUDA to train model')
-parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float,
+parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
                     help='Momentum value for optim')
@@ -51,6 +55,8 @@ parser.add_argument('--visdom', default=False, type=str2bool,
                     help='Use visdom for loss visualization')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
+parser.add_argument('--roi', default="body",
+                help='Either face or body')
 args = parser.parse_args()
 
 
@@ -77,7 +83,7 @@ def train():
                   "--dataset_root was not specified.")
             args.dataset_root = COCO_ROOT
         cfg = coco
-        dataset = COCODetection(root=args.dataset_root,
+        dataset = COCODetection(root=args.dataset_root, image_set='%s_coco_train' % args.roi,
                                 transform=SSDAugmentation(cfg['min_dim'],
                                                           MEANS))
     elif args.dataset == 'VOC':
@@ -109,6 +115,8 @@ def train():
 
     if args.cuda:
         net = net.cuda()
+        # device = torch.device('cuda' if args.cuda else 'cpu')
+
 
     if not args.resume:
         print('Initializing weights...')
@@ -139,37 +147,55 @@ def train():
     if args.visdom:
         vis_title = 'SSD.PyTorch on ' + dataset.name
         vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
-        iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
-        epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
+        iter_plot = create_vis_plot(viz, 'Iteration', 'Loss', vis_title, vis_legend)
+        epoch_plot = create_vis_plot(viz, 'Epoch', 'Loss', vis_title, vis_legend)
 
     data_loader = data.DataLoader(dataset, args.batch_size,
                                   num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate,
-                                  pin_memory=True)
+                                  pin_memory=False) # according to https://github.com/pytorch/pytorch/issues/57273
     # create batch iterator
     batch_iterator = iter(data_loader)
     for iteration in range(args.start_iter, cfg['max_iter']):
         if args.visdom and iteration != 0 and (iteration % epoch_size == 0):
-            update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,
+            epoch += 1 #ref: https://github.com/amdegroot/ssd.pytorch/issues/234
+            update_vis_plot(viz, epoch, loc_loss, conf_loss, epoch_plot, None,
                             'append', epoch_size)
             # reset epoch loss counters
             loc_loss = 0
             conf_loss = 0
-            epoch += 1
+            # epoch += 1
 
         if iteration in cfg['lr_steps']:
             step_index += 1
             adjust_learning_rate(optimizer, args.gamma, step_index)
 
         # load train data
-        images, targets = next(batch_iterator)
+        # images, targets = next(batch_iterator)
+
+        try:
+            images, targets = next(batch_iterator)
+        except StopIteration:
+            batch_iterator = iter(data_loader)
+            images, targets = next(batch_iterator)
+
 
         if args.cuda:
             images = Variable(images.cuda())
-            targets = [Variable(ann.cuda(), volatile=True) for ann in targets]
+            with torch.no_grad():
+                targets = [Variable(ann.cuda()) for ann in targets]
         else:
             images = Variable(images)
-            targets = [Variable(ann, volatile=True) for ann in targets]
+            with torch.no_grad():
+                targets = [Variable(ann) for ann in targets]
+                
+        # if args.cuda:
+        #     images = images.cuda() # Variable(images.cuda())
+        #     targets = [torch.FloatTensor(ann).cuda() for ann in targets]
+        # [ann.cuda() for ann in targets]
+        # ref: https://stackoverflow.com/questions/61720460/volatile-was-removed-and-now-had-no-effect-use-with-torch-no-grad-instread
+        # [Variable(ann.cuda(), volatile=True) for ann in targets]
+        
         # forward
         t0 = time.time()
         out = net(images)
@@ -180,15 +206,17 @@ def train():
         loss.backward()
         optimizer.step()
         t1 = time.time()
-        loc_loss += loss_l.data[0]
-        conf_loss += loss_c.data[0]
+        # changed all data[0] to item() due to pytorch version:
+        # ref: https://github.com/amdegroot/ssd.pytorch/issues/421
+        loc_loss += loss_l.item() #.data[0]
+        conf_loss += loss_c.item() #data[0]
 
         if iteration % 10 == 0:
             print('timer: %.4f sec.' % (t1 - t0))
-            print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.data[0]), end=' ')
+            print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.item()), end=' ')
 
         if args.visdom:
-            update_vis_plot(iteration, loss_l.data[0], loss_c.data[0],
+            update_vis_plot(viz, iteration, loss_l.item(), loss_c.item(),
                             iter_plot, epoch_plot, 'append')
 
         if iteration != 0 and iteration % 5000 == 0:
@@ -211,7 +239,10 @@ def adjust_learning_rate(optimizer, gamma, step):
 
 
 def xavier(param):
-    init.xavier_uniform(param)
+    # ref (warning): UserWarning: nn.init.xavier_uniform is now deprecated in favor of nn.init.xavier_uniform_.init.xavier_uniform(param)
+    init.xavier_uniform_(param)
+    # init.xavier_uniform(param)
+    # init.xavier_uniform_.init.xavier_uniform(param)
 
 
 def weights_init(m):
@@ -220,7 +251,7 @@ def weights_init(m):
         m.bias.data.zero_()
 
 
-def create_vis_plot(_xlabel, _ylabel, _title, _legend):
+def create_vis_plot(viz, _xlabel, _ylabel, _title, _legend):
     return viz.line(
         X=torch.zeros((1,)).cpu(),
         Y=torch.zeros((1, 3)).cpu(),
@@ -233,7 +264,7 @@ def create_vis_plot(_xlabel, _ylabel, _title, _legend):
     )
 
 
-def update_vis_plot(iteration, loc, conf, window1, window2, update_type,
+def update_vis_plot(viz, iteration, loc, conf, window1, window2, update_type,
                     epoch_size=1):
     viz.line(
         X=torch.ones((1, 3)).cpu() * iteration,

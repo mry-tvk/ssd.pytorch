@@ -14,21 +14,22 @@ ANNOTATIONS = 'annotations'
 COCO_API = 'PythonAPI'
 INSTANCES_SET =  'via_ft_{}.json' #'instances_val_{}.json'
 
-COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
-                'train', 'truck', 'boat', 'traffic light', 'fire', 'hydrant',
-                'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
-                'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra',
-                'giraffe', 'backpack', 'umbrella', 'handbag', 'tie',
-                'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-                'kite', 'baseball bat', 'baseball glove', 'skateboard',
-                'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup',
-                'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-                'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza',
-                'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed',
-                'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote',
-                'keyboard', 'cell phone', 'microwave oven', 'toaster', 'sink',
-                'refrigerator', 'book', 'clock', 'vase', 'scissors',
-                'teddy bear', 'hair drier', 'toothbrush')
+COCO_CLASSES = ('chimp')
+# ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+#                 'train', 'truck', 'boat', 'traffic light', 'fire', 'hydrant',
+#                 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
+#                 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra',
+#                 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie',
+#                 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+#                 'kite', 'baseball bat', 'baseball glove', 'skateboard',
+#                 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup',
+#                 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+#                 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza',
+#                 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed',
+#                 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote',
+#                 'keyboard', 'cell phone', 'microwave oven', 'toaster', 'sink',
+#                 'refrigerator', 'book', 'clock', 'vase', 'scissors',
+#                 'teddy bear', 'hair drier', 'toothbrush')
 
 
 def get_label_map(label_file):
@@ -85,7 +86,11 @@ class COCODetection(data.Dataset):
     """
 
     def __init__(self, root, image_set='trainval35k', transform=None,
-                 target_transform=COCOAnnotationTransform(), dataset_name='MS COCO'):
+                 target_transform=None, dataset_name='MS COCO'):
+        # ref: https://github.com/amdegroot/ssd.pytorch/pull/141/commits/74e0863037830665884df4eccb771ac66850c141
+        if target_transform is None:
+            target_transform = COCOAnnotationTransform()
+
         sys.path.append(osp.join(root, COCO_API))
         from pycocotools.coco import COCO
         self.coco = COCO(osp.join(root, ANNOTATIONS,
@@ -104,8 +109,8 @@ class COCODetection(data.Dataset):
             tuple: Tuple (image, target).
                    target is the object returned by ``coco.loadAnns``.
         """
-        im, gt, h, w = self.pull_item(index)
-        return im, gt
+        im, gt, h, w, path = self.pull_item(index)
+        return im, gt, path
 
     def __len__(self):
         return len(self.ids)
@@ -136,7 +141,7 @@ class COCODetection(data.Dataset):
             img = img[:, :, (2, 1, 0)]
 
             target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
-        return torch.from_numpy(img).permute(2, 0, 1), target, height, width
+        return torch.from_numpy(img).permute(2, 0, 1), target, height, width, path
 
     def pull_image(self, index):
         '''Returns the original image object at index in PIL form

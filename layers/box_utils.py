@@ -107,7 +107,7 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
     matches = truths[best_truth_idx]          # Shape: [num_priors,4]
     conf = labels[best_truth_idx] + 1         # Shape: [num_priors]
     conf[best_truth_overlap < threshold] = 0  # label as background
-    loc = encode(matches, priors, variances)
+    loc = encode(matches, priors, variances) #matches # 
     loc_t[idx] = loc    # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf  # [num_priors] top class label for each prior
 
@@ -172,7 +172,7 @@ def log_sum_exp(x):
 # Original author: Francisco Massa:
 # https://github.com/fmassa/object-detection.torch
 # Ported to PyTorch by Max deGroot (02/01/2017)
-def nms(boxes, scores, overlap=0.5, top_k=200):
+def nms(boxes, scores, thr=.75, overlap=0.5, top_k=200):
     """Apply non-maximum suppression at test time to avoid detecting too many
     overlapping bounding boxes for a given object.
     Args:
@@ -184,7 +184,10 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
         The indices of the kept boxes with respect to num_priors.
     """
 
+    scores[scores < thr] = 0
+    
     keep = scores.new(scores.size(0)).zero_().long()
+    # print(keep)
     if boxes.numel() == 0:
         return keep
     x1 = boxes[:, 0]
@@ -209,7 +212,7 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
         # keep.append(i)
         keep[count] = i
         count += 1
-        if idx.size(0) == 1:
+        if idx.size(0) == 1 or v[idx[-1]] == 0:
             break
         idx = idx[:-1]  # remove kept element from view
         # load bboxes of next highest vals
@@ -237,3 +240,5 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
         # keep only elements with an IoU <= overlap
         idx = idx[IoU.le(overlap)]
     return keep, count
+
+

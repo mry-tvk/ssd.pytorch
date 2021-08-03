@@ -58,6 +58,12 @@ class MultiBoxLoss(nn.Module):
                 shape: [batch_size,num_objs,5] (last idx is the label).
         """
         loc_data, conf_data, priors = predictions
+        if self.use_gpu:
+            priors = priors.cuda()
+            conf_data = conf_data.cuda()
+            loc_data = loc_data.cuda()
+
+
         num = loc_data.size(0)
         priors = priors[:loc_data.size(1), :]
         num_priors = (priors.size(0))
@@ -66,19 +72,24 @@ class MultiBoxLoss(nn.Module):
         # match priors (default boxes) and ground truth boxes
         loc_t = torch.Tensor(num, num_priors, 4)
         conf_t = torch.LongTensor(num, num_priors)
+
+        if self.use_gpu:
+            loc_t = loc_t.cuda()
+            conf_t = conf_t.cuda()
+
         for idx in range(num):
             truths = targets[idx][:, :-1].data
             labels = targets[idx][:, -1].data
             defaults = priors.data
+
             if self.use_gpu:
                 truths = truths.cuda()
                 labels = labels.cuda()
                 defaults = defaults.cuda()
+
             match(self.threshold, truths, defaults, self.variance, labels,
                   loc_t, conf_t, idx)
-        if self.use_gpu:
-            loc_t = loc_t.cuda()
-            conf_t = conf_t.cuda()
+            
         # wrap targets
         loc_t = Variable(loc_t, requires_grad=False)
         conf_t = Variable(conf_t, requires_grad=False)
@@ -93,24 +104,37 @@ class MultiBoxLoss(nn.Module):
         loc_t = loc_t[pos_idx].view(-1, 4)
         loss_l = F.smooth_l1_loss(loc_p, loc_t, reduction='sum') 
         #size_average=False) #ref: https://github.com/amdegroot/ssd.pytorch/issues/421
-
+        
         # Compute max conf across batch for hard negative mining
         batch_conf = conf_data.view(-1, self.num_classes)
-        loss_c = log_sum_exp(batch_conf) - batch_conf.gather(1, conf_t.view(-1, 1))
+
+        # replaced this line with next four lines due to error!!
+        # loss_c = log_sum_exp(batch_conf) - batch_conf.gather(1, conf_t.view(-1, 1))
+
+        # resolving error for "face" dataste: I have no idea why it works!!! ref: https://github.com/amdegroot/ssd.pytorch/issues/161
+        conf_tt = conf_t.view(-1,1)
+        conf_tt_index = (conf_tt != 0).nonzero()
+        conf_tt[conf_tt_index] = 1
+        loss_c = log_sum_exp(batch_conf) - batch_conf.gather(1, conf_tt)
+
 
         # Hard Negative Mining
-        loss_c = loss_c.view(pos.size()[0], pos.size()[1])
+        # loss_c = loss_c.view(pos.size()[0], pos.size()[1])
+        loss_c = loss_c.view(num, -1)
         loss_c[pos] = 0  # filter out pos boxes for now
         loss_c = loss_c.view(num, -1)
+
         _, loss_idx = loss_c.sort(1, descending=True)
         _, idx_rank = loss_idx.sort(1)
         num_pos = pos.long().sum(1, keepdim=True)
-        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1)
+        
+        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1)        
         neg = idx_rank < num_neg.expand_as(idx_rank)
 
         # Confidence Loss Including Positive and Negative Examples
         pos_idx = pos.unsqueeze(2).expand_as(conf_data)
         neg_idx = neg.unsqueeze(2).expand_as(conf_data)
+
         conf_p = conf_data[(pos_idx+neg_idx).gt(0)].view(-1, self.num_classes)
         targets_weighted = conf_t[(pos+neg).gt(0)]
         loss_c = F.cross_entropy(conf_p, targets_weighted, reduction='sum') 

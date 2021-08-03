@@ -1,4 +1,5 @@
 from data import *
+import copy
 from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
@@ -16,6 +17,10 @@ import numpy as np
 import argparse
 from tqdm import tqdm
 from layers.box_utils import jaccard, nms
+
+# get the Azure ML run object
+from azureml.core.run import Run
+run = Run.get_context()
 
 
 def str2bool(v):
@@ -37,19 +42,19 @@ parser = argparse.ArgumentParser(
 train_set = parser.add_mutually_exclusive_group()
 parser.add_argument('--dataset', default='COCO', choices=['VOC', 'COCO'],
                     type=str, help='VOC or COCO')
-parser.add_argument('--dataset_root', default=datasets['body'], # VOC_ROOT,
+parser.add_argument('--dataset_root', default=datasets['face'], # VOC_ROOT,
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
                     help='Pretrained base model')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default='weights/ssd300_BFbootstrapBissau4p5k_prebossou_best.pth', type=str, #
+parser.add_argument('--resume', default='weights/'+MODEL_PATHS['face'], type=str, #
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
 parser.add_argument('--num_workers', default=4, type=int,
                     help='Number of workers used in dataloading')
-parser.add_argument('--cuda', default=False, type=str2bool,
+parser.add_argument('--cuda', default=True, type=str2bool,
                     help='Use CUDA to train model')
 parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     help='initial learning rate')
@@ -61,18 +66,26 @@ parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
 parser.add_argument('--visdom', default=False, type=str2bool,
                     help='Use visdom for loss visualization; make sure you run "python -m visdom.server" in terminal.')
+parser.add_argument('--AML', default=True, type=str2bool,
+                    help='Use AML for loss visualization')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('-t', dest='visual_threshold', default=DEFAULT_FACE_DETECT_VISUAL_THRESHOLD, type=float, help='Confidence threshold for detection')
 parser.add_argument('--output_folder', default="outputs",
                 help='Result root directory path')
-parser.add_argument('--roi', default="body",
+parser.add_argument('--roi', default="face",
                 help='Either face or body')
 parser.add_argument('--optimizer', '--optimizer', default='SGD', type=str,
                     help='SGD or ADAM')
-parser.add_argument('--num_frozen_layers', default=35,
+parser.add_argument('--num_frozen_layers', default=-1,
                     help='total_layers=55 = vgg:35 -> extras:8 -> loc: 6, conf: 6')
+parser.add_argument('--eval_interval', default=1, type=int, help='No. of epochs between two evaluation measure')
+parser.add_argument('--test_interval', default=20, type=int,
+                    help='No. of epochs between two test and checkpoint')
+parser.add_argument('--early_stopping_patience', default=20, type=int,
+                    help='No. of epochs waits before termination')
 args = parser.parse_args()
+
 
 # Error: "yield from torch.randperm(n, generator=generator).tolist(). RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'"
 # ref: https://discuss.pytorch.org/t/distributedsampler-runtimeerror-expected-a-cuda-device-type-for-generator-but-found-cpu/103594
@@ -88,6 +101,12 @@ args = parser.parse_args()
 
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
+
+def toggle_phase(net, new_phase='train'):
+    if args.cuda:
+        net.module.phase = new_phase
+        return
+    net.phase = new_phase
 
 def train():
     if args.dataset == 'COCO':
@@ -122,9 +141,9 @@ def train():
     net.phase = 'train'
     ssd_net.phase = 'train'
 
-    if args.cuda:
-        net = torch.nn.DataParallel(ssd_net)
-        cudnn.benchmark = True
+    # if args.cuda:
+    #     net = torch.nn.DataParallel(ssd_net)
+    #     cudnn.benchmark = True
 
     if args.resume:
         print('Resuming training, loading {}...'.format(args.resume))
@@ -134,9 +153,6 @@ def train():
         print('Loading base network...')
         ssd_net.vgg.load_state_dict(vgg_weights)
 
-    if args.cuda:
-        net = net.cuda()
-        # device = torch.device('cuda' if args.cuda else 'cpu')
 
     if not args.resume:
         print('Initializing weights...')
@@ -145,8 +161,32 @@ def train():
         ssd_net.loc.apply(weights_init)
         ssd_net.conf.apply(weights_init)
 
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
-                          weight_decay=args.weight_decay)
+    # freeze the layers
+    args.num_frozen_layers = int(args.num_frozen_layers)
+    if args.num_frozen_layers != -1:
+        freeze_layers_up_to(net, args.num_frozen_layers)
+
+    layer_no = 0
+    for (name, module) in net.named_children():
+        print(name)
+        for layer in module.children():
+            for param in layer.parameters():
+                print('Module {}: "{}" required_grad={}!'.format(layer_no, name, param.requires_grad))
+            layer_no += 1
+    # move to cuda
+    if args.cuda:
+        net = torch.nn.DataParallel(ssd_net)
+        cudnn.benchmark = True
+
+    # optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
+    #                       weight_decay=args.weight_decay)
+    if args.optimizer == 'Adam':
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr,
+                            weight_decay=args.weight_decay)
+    else:
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=args.lr,
+                            momentum=args.momentum, weight_decay=args.weight_decay)
+
     criterion = MultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
                              False, args.cuda)
 
@@ -180,13 +220,24 @@ def train():
                                   shuffle=False, collate_fn=detection_collate,
                                   pin_memory=False)
 
-    
-    loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_val, criterion, args)
-    avg_ious, duration = test(net, 0, data_loader_val, args)
+    with torch.no_grad():
+        loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_val, criterion, args)
+        avg_ious_val, duration_val = test(net, 0, data_loader_val, args)
 
     # avg_ious = -1
-    print("before fine-tuning", ' || Loss-val: %.4f ||' % (loss_val.item()), ' IOU-val: %.4f ||' % (avg_ious))
-    net.phase = 'train'
+    print("before fine-tuning", ' || Loss-val: %.4f ||' % (loss_val.item()), ' IOU-val: %.4f ||' % (avg_ious_val))
+    toggle_phase(net, new_phase='train')
+
+    # overall eval metrics
+    best_val_iou = avg_ious_val
+    best_val_loss = loss_val
+    best_val_epoch = 0
+
+    last_saved_loss = loss_val
+    termination_flag = False
+
+    # best trained network based on val_loss
+    # best_model_wts = copy.deepcopy(net.state_dict())
 
     # create batch iterator
     batch_iterator = iter(data_loader)
@@ -195,21 +246,75 @@ def train():
         if iteration != 0 and (iteration % epoch_size == 0):
             # epoch counter
             epoch += 1 #ref: https://github.com/amdegroot/ssd.pytorch/issues/234
-            net.eval()
             
             # evaluation
-            loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_val, criterion, args)
-            avg_ious, duration = test(net, epoch, data_loader_val, args)
-            print('\nepoch ' + repr(epoch) + ' || iter ' + repr(iteration) + ' || Loss-train: %.4f ||' % ((loc_loss+conf_loss)/epoch_size))
-            print('epoch ' + repr(epoch) + ' || iter ' + repr(iteration) + ' || Loss-val: %.4f ||' % (loss_val.item()), ' IOU-val: %.4f ||' % (avg_ious))
-            
-            if args.visdom:
-                update_vis_plot(viz, epoch, loc_loss, conf_loss, epoch_plot, None,
-                                'append', epoch_size)
-            
+            if epoch % args.eval_interval == 0:
+                net.eval()
+                eval_size = epoch_size * args.eval_interval
+                
+                with torch.no_grad():
+                    loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_val, criterion, args)
+                    
+                    # overall eval metrics
+                    if best_val_loss > loss_val:
+                        best_val_loss = loss_val
+                        best_val_epoch = epoch
+                    elif epoch - best_val_epoch >= args.early_stopping_patience:
+                        torch.save(ssd_net.state_dict(), os.path.join(args.output_folder, 'weights/ssd300_COCO_iter' +
+                                '_epoch' + repr(epoch) + '_last.pth'))
+                        termination_flag = True
+
+
+                print('\nepoch ' + repr(epoch) + ' || iter ' + repr(iteration) + ' || Loss-train: %.4f ||' % ((loc_loss+conf_loss)/eval_size))
+                print('epoch ' + repr(epoch) + ' || iter ' + repr(iteration) + ' || Loss-val: %.4f ||' % (loss_val.item()), ' IOU-val: %.4f ||' % (avg_ious_val))
+                
+                if args.visdom:
+                    update_vis_plot(viz, epoch, loc_loss, conf_loss, epoch_plot, None,
+                                    'append', eval_size)
+                if args.AML:
+                    # log the best val accuracy to AML run
+                    run.log('loss_train', np.float((loc_loss+conf_loss)/eval_size))
+                    run.log('loss_l_train', np.float(loc_loss/eval_size))
+                    run.log('loss_c_train', np.float(conf_loss/eval_size))
+                    # run.log('avg_iou_train', np.float(avg_ious))
+
+                    run.log('avg_iou_val', np.float(avg_ious_val))
+                    run.log('loss_val', np.float(loss_val.item()))
+                    run.log('loss_l_val', np.float(loss_l_val.item()))
+                    run.log('loss_c_val', np.float(loss_c_val.item()))
+
+                    run.log('best_val_loss', np.float(best_val_loss))
+                    run.log('best_val_iou', np.float(best_val_iou))
+                
+            # test & checkpoint
+            if epoch % args.test_interval == 0:
+                with torch.no_grad():
+                    avg_ious_val, duration = test(net, epoch, data_loader_val, args)
+                
+                    # save best iou value
+                    if best_val_iou < avg_ious_val:
+                        best_val_iou = avg_ious_val
+
+                    # checkpoint
+                    print('Saving state, iter:', repr(iteration), ', epoch: ', repr(epoch))
+
+                    # first time
+                    if not os.path.exists(os.path.join(args.output_folder, 'weights')):
+                        os.makedirs(os.path.join(args.output_folder, 'weights'))
+                    
+                    # best or last
+                    if last_saved_loss > loss_val:
+                        torch.save(ssd_net.state_dict(), os.path.join(args.output_folder, 'weights/ssd300_COCO_iter' +
+                                '_epoch' + repr(epoch) + '_best.pth'))
+                        last_saved_loss = loss_val
+
+            # early termination check
+            if termination_flag:
+                break
+
             # reset epoch loss counters
             net.train()
-            net.phase = 'train'
+            toggle_phase(net, new_phase='train')
 
             loc_loss = 0
             conf_loss = 0
@@ -257,13 +362,8 @@ def train():
             update_vis_plot(viz, iteration, loss_l.item(), loss_c.item(),
                             iter_plot, epoch_plot, 'append')
 
-        if iteration != 0 and iteration % 5000 == 0:
-            print('Saving state, iter:', iteration)
-            torch.save(ssd_net.state_dict(), 'weights/ssd300_COCO_' +
-                       repr(iteration) + '.pth')
-    torch.save(ssd_net.state_dict(),
-               args.save_folder + '' + args.dataset + '.pth')
-
+    print('Best val loss: {:4f}'.format(best_val_loss))
+    print('Best val Acc: {:4f}'.format(best_val_iou))
 
 def adjust_learning_rate(optimizer, gamma, step):
     """Sets the learning rate to the initial LR decayed by 10 at every
@@ -322,7 +422,7 @@ def update_vis_plot(viz, iteration, loc, conf, window1, window2, update_type,
 def eval(net, data_loader, criterion, args):
 
     # this determines what kind of output is produced, we want the same as during training
-    net.phase = 'train' 
+    toggle_phase(net, new_phase='train')
     
     # but we still don't what the model to learn
     net.eval() 
@@ -346,14 +446,14 @@ def eval(net, data_loader, criterion, args):
 
 def test(net, epoch_id, data_loader, args):
     # because net is moved to torch.nn.DataParallel, it cannot capture features directly
-    net.phase = 'test'
+    toggle_phase(net, new_phase='test')
     
     net.eval()
     for images, targets, paths in tqdm(data_loader, desc="eval", ncols=0, disable=True):
+        device = 'cuda' if args.cuda else 'cpu'
         if args.cuda:
             images = images.cuda()
-            targets = [torch.FloatTensor(ann).cuda() for ann in targets] 
-
+            # targets = [torch.FloatTensor(ann).cuda() for ann in targets] 
         # forward
         t0 = time.time()
         with torch.no_grad():
@@ -385,6 +485,32 @@ def test(net, epoch_id, data_loader, args):
         
     avg_ious = (ious/n_targets) if n_targets > 0 else 0
     return avg_ious, duration
+
+def freeze_module_by_name(net, module_name):
+    for (name, module) in net.named_children():
+        if name == module_name:
+            for param in module.parameters():
+                    param.requires_grad = False
+            print('Module "{}" was frozen!'.format(name))
+
+def freeze_layers_up_to(net, to_layer=0):
+    layer_counter = 0
+    for (name, module) in net.named_children():
+        if layer_counter >= to_layer:
+            break
+        elif not module.children():
+            for param in module():
+                param.requires_grad = False
+            layer_counter += 1
+        else:
+            for layer in module.children():
+                if layer_counter >= to_layer:
+                    break
+                for param in layer.parameters():
+                    param.requires_grad = False
+                
+                print('Layer "{}" in module "{}" was frozen!'.format(layer_counter, name))
+                layer_counter+=1
 
 # means = data_loader.dataset.transform.mean
 import matplotlib.pyplot as plt

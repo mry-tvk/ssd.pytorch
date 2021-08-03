@@ -149,10 +149,11 @@ def decode(loc, priors, variances):
     Return:
         decoded bounding box predictions
     """
-
     boxes = torch.cat((
-        priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:],
-        priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1])), 1)
+        # priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:],
+        # priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1])), 1)
+        priors[:, :2].cuda() + loc[:, :2] * variances[0] * priors[:, 2:].cuda(),
+        priors[:, 2:].cuda() * torch.exp(loc[:, 2:] * variances[1])), 1)
     boxes[:, :2] -= boxes[:, 2:] / 2
     boxes[:, 2:] += boxes[:, :2]
     return boxes
@@ -172,7 +173,7 @@ def log_sum_exp(x):
 # Original author: Francisco Massa:
 # https://github.com/fmassa/object-detection.torch
 # Ported to PyTorch by Max deGroot (02/01/2017)
-def nms(boxes, scores, thr=.75, overlap=0.5, top_k=200):
+def nms(boxes, scores, thr=.5, overlap=0.5, top_k=200):
     """Apply non-maximum suppression at test time to avoid detecting too many
     overlapping bounding boxes for a given object.
     Args:
@@ -208,6 +209,10 @@ def nms(boxes, scores, thr=.75, overlap=0.5, top_k=200):
     # keep = torch.Tensor()
     count = 0
     while idx.numel() > 0:
+        xx1.resize_(0)
+        yy1.resize_(0)
+        xx2.resize_(0)
+        yy2.resize_(0)
         i = idx[-1]  # index of current largest val
         # keep.append(i)
         keep[count] = i

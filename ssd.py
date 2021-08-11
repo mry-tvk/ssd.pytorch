@@ -120,7 +120,7 @@ class SSD(nn.Module):
         if self.phase == "test":
             # PyTorch1.5.0 support new-style autograd function
             # output = self.detect(
-            output = self.detect.apply(self.num_classes, 0, 200, 0.01, 0.45,
+            output = self.detect.apply(self.num_classes, 0, 200, 0.01, 0.45, #0.37, #
                 # PyTorch1.5.0 support new-style autograd function
                 loc.view(loc.size(0), -1, 4),                   # loc preds
                 self.softmax(conf.view(conf.size(0), -1,
@@ -145,8 +145,7 @@ class SSD(nn.Module):
             print('Finished!')
         else:
             print('Sorry only .pth and .pkl files supported.')
-
-
+            
 # This function is derived from torchvision VGG make_layers()
 # https://github.com/pytorch/vision/blob/master/torchvision/models/vgg.py
 def vgg(cfg, i, batch_norm=False):

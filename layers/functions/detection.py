@@ -51,12 +51,12 @@ class Detect(Function):
                 Shape: [1,num_priors,4]
         """
         num = loc_data.size(0)  # batch size
-        num_priors = prior_data.size(0)
+        num_priors = prior_data.size(0) #num_priors
         # [バッチサイズN,クラス数21,トップ200件,確信度+位置]のゼロリストを作成
         output = torch.zeros(num, self.num_classes, self.top_k, 5)
         # 確信度を[バッチサイズN,クラス数,ボックス数]の順番に変更
         conf_preds = conf_data.view(num, num_priors,
-                                    self.num_classes).transpose(2, 1)
+                                    self.num_classes).transpose(2, 1) #outsize: batch, class, num_priors
 
         # Decode predictions into bboxes.
         for i in range(num):

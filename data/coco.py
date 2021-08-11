@@ -12,7 +12,7 @@ COCO_ROOT = osp.join(HOME, 'data/')
 IMAGES = 'images'
 ANNOTATIONS = 'annotations'
 COCO_API = 'PythonAPI'
-INSTANCES_SET =  'via_ft_{}.json' #'instances_val_{}.json'
+INSTANCES_SET =  '{}.json' #'instances_val_{}.json'
 
 COCO_CLASSES = ('chimp')
 # ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',

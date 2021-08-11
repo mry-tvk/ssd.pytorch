@@ -28,14 +28,15 @@ def str2bool(v):
 
 MODEL_PATHS = {
     'body': 'ssd300_BFbootstrapBissau4p5k_prebossou_best.pth',
-    'face': 'ssd300_CFbootstrap_85000.pth'
+    'face': 'ssd300_CFbootstrap_85000.pth',
+    'fine_tuned_face': 'ssd300_COCO_iter_epoch614_last.pth' #'ssd300_CFbootstrap_85000.pth' # 'ssd300_COCO_iter_epoch51_last.pth' # 
 }
 datasets ={
     'face':'../datasets/dataset_ft_face',
     'body': '../datasets/dataset_ft_body'
 }
 DEFAULT_FACE_DETECT_VISUAL_THRESHOLD = 0.37
-
+# example: tape J_000080093.png
 
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Training With Pytorch')
@@ -60,7 +61,7 @@ parser.add_argument('--lr', '--learning-rate', default=1e-5, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
                     help='Momentum value for optim')
-parser.add_argument('--weight_decay', default=5e-4, type=float,
+parser.add_argument('--weight_decay', default=5e-4, type=float, 
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
@@ -80,10 +81,12 @@ parser.add_argument('--optimizer', '--optimizer', default='SGD', type=str,
 parser.add_argument('--num_frozen_layers', default=-1,
                     help='total_layers=55 = vgg:35 -> extras:8 -> loc: 6, conf: 6')
 parser.add_argument('--eval_interval', default=1, type=int, help='No. of epochs between two evaluation measure')
-parser.add_argument('--test_interval', default=20, type=int,
+parser.add_argument('--test_interval', default=10, type=int,
                     help='No. of epochs between two test and checkpoint')
 parser.add_argument('--early_stopping_patience', default=20, type=int,
                     help='No. of epochs waits before termination')
+parser.add_argument('--only_validation', default=True, type=str2bool,
+                    help='Stop right after initial validation')
 args = parser.parse_args()
 
 
@@ -108,7 +111,53 @@ def toggle_phase(net, new_phase='train'):
         return
     net.phase = new_phase
 
+# -------- only validation -------- #
+def validation():
+    if args.dataset == 'COCO':
+        # load data
+        args.dataset_root = COCO_ROOT
+        cfg = coco
+        
+        # val_root = 'Users/matavako/train-hyperparameter-tune-deploy-with-pytorch/datasets/dataset_val'
+        val_root = '../datasets/dataset_val'
+        dataset_validation = COCODetection(root=val_root, image_set='instances_val_%s' % args.roi,
+                            transform=BaseTransform(cfg['min_dim'], MEANS))
+
+        data_loader_validation = data.DataLoader(
+                                    dataset_validation,
+                                    args.batch_size,
+                                    num_workers=args.num_workers,
+                                    collate_fn=detection_collate,
+                                    pin_memory=True)
+        
+        criterion = MultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
+                             False, args.cuda)
+        
+        # load model
+        ssd_net = build_ssd('test', cfg['min_dim'], cfg['num_classes'])
+        net = ssd_net
+        # net.load_weights('Users/matavako/train-hyperparameter-tune-deploy-with-pytorch/ssd.pytorch/weights/'+MODEL_PATHS["fine_tuned_%s"%args.roi])
+        net.load_weights('weights/'+MODEL_PATHS["fine_tuned_%s"%args.roi])
+
+        if args.cuda:
+            net = torch.nn.DataParallel(ssd_net)
+            cudnn.benchmark = True
+
+        with torch.no_grad():
+            loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_validation, criterion, args)
+            avg_ious_val, duration_val = test(net, 0, data_loader_validation, args, nsamples='all')
+            print("validation:", ' || Loss-val: %.4f ||' % (loss_val.item()), ' IOU-val: %.4f ||' % (avg_ious_val))
+            
+            # with open(os.path.join(args.output_folder, "Users/matavako/train-hyperparameter-tune-deploy-with-pytorch/ssd.pytorch/results.txt"), 'w') as f:
+            with open(os.path.join(args.output_folder, "results.txt"), 'w') as f:
+                f.write("%f\n" % avg_ious_val)
+            if args.only_validation:
+                exit(0)
+    else:
+        print("We have not implemented the non-COCO implementattion!")
+
 def train():
+    # --------------------------- if training ----------------------------------------------
     if args.dataset == 'COCO':
         if args.dataset_root == VOC_ROOT:
             if not os.path.exists(COCO_ROOT):
@@ -117,10 +166,11 @@ def train():
                   "--dataset_root was not specified.")
             args.dataset_root = COCO_ROOT
         cfg = coco
-        dataset = COCODetection(root=args.dataset_root, image_set='%s_coco_train' % args.roi,
+        
+        dataset = COCODetection(root=args.dataset_root, image_set='via_ft_%s_coco_train' % args.roi,
                                 transform=SSDAugmentation(cfg['min_dim'],
                                                           MEANS))
-        dataset_val = COCODetection(root=args.dataset_root, image_set='%s_coco_eval' % args.roi,
+        dataset_val = COCODetection(root=args.dataset_root, image_set='via_ft_%s_coco_eval' % args.roi,
                                 transform=BaseTransform(cfg['min_dim'], MEANS))
 
     elif args.dataset == 'VOC':
@@ -141,10 +191,6 @@ def train():
     net.phase = 'train'
     ssd_net.phase = 'train'
 
-    # if args.cuda:
-    #     net = torch.nn.DataParallel(ssd_net)
-    #     cudnn.benchmark = True
-
     if args.resume:
         print('Resuming training, loading {}...'.format(args.resume))
         ssd_net.load_weights(args.resume)
@@ -152,8 +198,7 @@ def train():
         vgg_weights = torch.load(args.save_folder + args.basenet)
         print('Loading base network...')
         ssd_net.vgg.load_state_dict(vgg_weights)
-
-
+    
     if not args.resume:
         print('Initializing weights...')
         # initialize newly added layers' weights with xavier method
@@ -173,6 +218,7 @@ def train():
             for param in layer.parameters():
                 print('Module {}: "{}" required_grad={}!'.format(layer_no, name, param.requires_grad))
             layer_no += 1
+    
     # move to cuda
     if args.cuda:
         net = torch.nn.DataParallel(ssd_net)
@@ -189,20 +235,12 @@ def train():
 
     criterion = MultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
                              False, args.cuda)
-
-    net.train()
-    # loss counters
-    loc_loss = 0
-    conf_loss = 0
-    epoch = 0
     print('Loading the dataset...')
 
     epoch_size = len(dataset) // args.batch_size
     print('Training SSD on:', dataset.name)
     print('Using the specified args:')
     print(args)
-
-    step_index = 0
 
     if args.visdom:
         vis_title = 'SSD.PyTorch on ' + dataset.name
@@ -220,6 +258,7 @@ def train():
                                   shuffle=False, collate_fn=detection_collate,
                                   pin_memory=False)
 
+    
     with torch.no_grad():
         loss_val, loss_l_val, loss_c_val, duration_val = eval(net, data_loader_val, criterion, args)
         avg_ious_val, duration_val = test(net, 0, data_loader_val, args)
@@ -233,6 +272,13 @@ def train():
     best_val_loss = loss_val
     best_val_epoch = 0
 
+    step_index = 0
+
+    # loss counters
+    loc_loss = 0
+    conf_loss = 0
+    epoch = 0
+
     last_saved_loss = loss_val
     termination_flag = False
 
@@ -240,6 +286,7 @@ def train():
     # best_model_wts = copy.deepcopy(net.state_dict())
 
     # create batch iterator
+    net.train()
     batch_iterator = iter(data_loader)
     for iteration in range(args.start_iter, cfg['max_iter']):
         # check if new epoch
@@ -444,7 +491,12 @@ def eval(net, data_loader, criterion, args):
             duration = t1 - t0
     return loss, loss_l, loss_c, duration
 
-def test(net, epoch_id, data_loader, args):
+def test(net, epoch_id, data_loader, args, nsamples=10):
+    '''
+    nsample: number of samples to do iou evaluation
+    '''
+    # IOU current problems: 
+
     # because net is moved to torch.nn.DataParallel, it cannot capture features directly
     toggle_phase(net, new_phase='test')
     
@@ -458,12 +510,12 @@ def test(net, epoch_id, data_loader, args):
         t0 = time.time()
         with torch.no_grad():
             net_detections = net(images) #idx, loc, conf, prior
-
         ious = 0
         n_targets = 0
+        n_sample_selection = images.shape[0] if nsamples=='all' else nsamples
 
         # take a sample of images for visualization
-        idx = np.random.choice(images.shape[0], min(images.shape[0], 10), replace=False)
+        idx = np.random.choice(images.shape[0], min(images.shape[0], n_sample_selection), replace=False)
 
         for i in idx: # iterate over images
             img = images[i].clone()
@@ -472,13 +524,32 @@ def test(net, epoch_id, data_loader, args):
             pt = (net_detections[i, 1, :, 1:] * scale)
             target_i = (targets[i][:,:4] * scale)
 
-            best_boxes = nms(pt, score.clone(), thr=args.visual_threshold) # [n_priors], n_good_boxes
-            iou = jaccard(target_i, pt) # [n_targets, n_priors]
-            n_targets += target_i.shape[0]
-            ious += iou[:,0].sum().item()
+            # best_boxes = nms(pt, score.clone()) #, thr=args.visual_threshold) # [n_priors], n_good_boxes
             
+            # iou calculation --- consider the max overlap for matching the target & preds
+            iou = jaccard(target_i, pt) # [n_targets, n_priors]
+
+            if iou.shape[1] > 0: # find max for each target
+                match_box_iou, match_idx = iou.max(1)
+                # match_idx = match_idx.item()
+            match_box_iou = match_box_iou + torch.tensor([0]) * (target_i.shape[0]- match_box_iou.shape[0])
+            n_targets += target_i.shape[0]
+            ious += match_box_iou.sum().item()
+
+            # best_boxes ===> Threshold does not impact IOU calculation
+            score[score < args.visual_threshold] = 0
+
+            # assuming that score is sorted descending ==> it should be
+            best_box_indexes = score.nonzero(as_tuple=True)[0]
+
+            # only keep the best instead of top_k 
+            score = score[:len(best_box_indexes)]
+            pt = pt[:len(best_box_indexes)]
+
+            # visualize the target (& iou based on best-box) + nms-selected boxes (predictions)(& corresponding scores)
             filename = os.path.join(args.output_folder, 'images', str(epoch_id), os.path.basename(paths[i]))
-            visualize(img, target_i, pt, score, iou, best_boxes, filename, data_loader.dataset.transform.mean)
+            visualize(img, target_i, pt, score, best_box_indexes=best_box_indexes, iou=match_box_iou, filename=filename, means=data_loader.dataset.transform.mean)
+            # visualize(img, target_i, pt[match_idx], score[match_idx], iou[match_idx], filename, data_loader.dataset.transform.mean)
 
         t1 = time.time()
         duration = t1 - t0
@@ -516,7 +587,8 @@ def freeze_layers_up_to(net, to_layer=0):
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-def visualize(img, target_i, pt, score, iou, best_boxes, filename, means):
+def visualize(img, target_i, pt, score, best_box_indexes, iou, filename, means):
+
     if not os.path.exists(os.path.dirname(filename)):
         os.makedirs(os.path.dirname(filename))
     
@@ -524,14 +596,18 @@ def visualize(img, target_i, pt, score, iou, best_boxes, filename, means):
     img = img.cpu()
     target_i = target_i.cpu()
     pt = pt.cpu()
-
+    
     out_img = img.cpu().permute(1,2,0).numpy()
     out_img = out_img[:, :, (2, 1, 0)]
     out_img += np.array(means)
     fig, ax = plt.subplots()
     ax.imshow(out_img.astype('int'))
-    for b in range(best_boxes[1]):
-        bb = best_boxes[0][b].item()
+
+    for b in range(len(best_box_indexes)): #best_boxes[1]):
+        # each match_box ===>
+        bb = best_box_indexes[b] #match_idx[b].item() # best_boxes[0][b].item()
+        # if score[bb] < 0.37:
+        #    continue
         coords = ( max(float(pt[bb, 0]), 0.0),
         max(float(pt[bb, 1]), 0.0),
         min(float(pt[bb, 2]), img.shape[2]),
@@ -539,13 +615,23 @@ def visualize(img, target_i, pt, score, iou, best_boxes, filename, means):
         rect = patches.Rectangle((coords[0], coords[1]), coords[2] - coords[0], coords[3] - coords[1], lw=1, edgecolor=plt.cm.GnBu(250), facecolor='none')
         ax.add_patch(rect)
         ax.text(coords[0], coords[1] - 5, "score: %0.2f" % score[bb].item(), fontsize='xx-small', bbox=dict(boxstyle="round", fc="w", ec="0.5", alpha=0.9))
+
+    # for t in range(target_i.shape[0]):
+    #     # each corresponding target ===>
+    #     rect = patches.Rectangle((target_i[b, 0], target_i[b, 1]), target_i[b, 2] - target_i[b, 0], target_i[b, 3] - target_i[b, 1], ls='--', lw=1, edgecolor=plt.cm.GnBu(200), facecolor='none')
+    #     ax.add_patch(rect)
+    #     ax.text(target_i[b, 0], target_i[b, 3] + 10, "iou: %0.2f" % iou[b].item(), fontsize='xx-small', bbox=dict(boxstyle="round", fc="w", ec="0.5", alpha=0.9))
+    
     for t in range(target_i.shape[0]):
         rect = patches.Rectangle((target_i[t, 0], target_i[t, 1]), target_i[t, 2] - target_i[t, 0], target_i[t, 3] - target_i[t, 1], ls='--', lw=1, edgecolor=plt.cm.GnBu(200), facecolor='none')
         ax.add_patch(rect)
-        ax.text(target_i[t, 0], target_i[t, 3] + 10, "iou: %0.2f" % iou[t,0].item(), fontsize='xx-small', bbox=dict(boxstyle="round", fc="w", ec="0.5", alpha=0.9))
+        ax.text(target_i[t, 0], target_i[t, 3] + 10, "iou: %0.2f" % iou[t].item(), fontsize='xx-small', bbox=dict(boxstyle="round", fc="w", ec="0.5", alpha=0.9))
     plt.axis('off')
     plt.savefig(filename)
     plt.close()
 
 if __name__ == '__main__':
-    train()
+    if args.only_validation:
+        validation()
+    else:
+        train()
